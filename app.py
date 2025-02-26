@@ -4,6 +4,7 @@ import os
 import urllib.parse
 from datetime import datetime, timedelta
 
+import bcrypt  # For hashing passwords
 import httpx
 import pyodbc
 import redis.asyncio as redis
@@ -150,6 +151,7 @@ def ensure_database_exists():
                     Country NVARCHAR(100) NOT NULL,
                     CreatedDate DATETIME DEFAULT GETDATE(),
                     IsActive BIT DEFAULT 1,
+                    password_hash NVARCHAR(255), -- column for hashed password
                     google_id NVARCHAR(255),
                     microsoft_id NVARCHAR(255),
                     facebook_id NVARCHAR(255),
@@ -326,6 +328,9 @@ def get_common_styles():
   .nav-left a, .nav-right a { color: #fff; text-decoration: none; margin-right: 15px; }
   .nav-left a:hover, .nav-right a:hover { text-decoration: underline; }
   .user-icon { margin-right: 5px; }
+  label { display: block; margin-top: 10px; }
+  input { width: 100%; padding: 8px; margin-top: 5px; }
+  button { padding: 10px 20px; margin-top: 15px; }
 </style>
 """
 
@@ -359,7 +364,6 @@ async def get_navbar_html():
   </div>
 </div>
 """
-    # Pass current_user, user_is_admin, and session to the template.
     return await render_template_string(navbar_template,
                                         current_user=current_user,
                                         user_is_admin=user_is_admin,
@@ -418,7 +422,6 @@ async def validate_subscription(user_id):
 ##############################################################################
 # ROUTES
 ##############################################################################
-# HOME (INDEX)
 
 
 @app.route("/")
@@ -444,6 +447,7 @@ async def home():
   <head>
     <meta charset="UTF-8">
     <title>CCN Home</title>
+    {{ styles|safe }}
   </head>
   <body>
     {{ navbar|safe }}
@@ -481,33 +485,68 @@ async def home():
     </div>
   </body>
 </html>
-""", navbar=navbar_html, upcoming=upcoming)
+""", navbar=navbar_html, upcoming=upcoming, styles=get_common_styles())
 
-# LOGIN
+# COMBINED LOGIN (OAuth and Email/Password)
 
 
-@app.route("/login")
+@app.route("/login", methods=["GET", "POST"])
 async def login():
     navbar_html = await get_navbar_html()
+    styles = get_common_styles()
+    if request.method == "POST":
+        form = await request.form
+        email = form.get("email")
+        password = form.get("password")
+        if not email or not password:
+            raise ValueError("Missing email or password")
+        session_db = await get_db_session()
+        r = await session_db.execute(text("SELECT * FROM Users WHERE Email=:email"), {"email": email})
+        user = r.fetchone()
+        if not user:
+            raise ValueError("Invalid email or password")
+        if not user.password_hash:
+            raise ValueError("No password set for this user; please use OAuth login.")
+        if not bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8")):
+            raise ValueError("Invalid email or password")
+        login_user(user.UserID, user.Email, user.RoleType)
+        return redirect(url_for("dashboard"))
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Login</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Login</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
       <h1>Login</h1>
-      <ul>
-        <li><a href="{{ url_for('oauth_login', provider='google') }}">Login with Google</a></li>
-        <li><a href="{{ url_for('oauth_login', provider='microsoft') }}">Login with Microsoft</a></li>
-        <li><a href="{{ url_for('oauth_login', provider='facebook') }}">Login with Facebook</a></li>
-        <li><a href="{{ url_for('oauth_login', provider='x') }}">Login with Provider X</a></li>
-      </ul>
+      <div style="margin-bottom:20px;">
+        <h2>Login with Email</h2>
+        <form method="POST">
+          <label>Email:</label>
+          <input type="email" name="email" required>
+          <label>Password:</label>
+          <input type="password" name="password" required>
+          <button type="submit">Login</button>
+        </form>
+      </div>
+      <div style="margin-bottom:20px;">
+        <h2>Or Login with</h2>
+        <ul>
+          <li><a href="{{ url_for('oauth_login', provider='google') }}">Login with Google</a></li>
+          <li><a href="{{ url_for('oauth_login', provider='microsoft') }}">Login with Microsoft</a></li>
+          <li><a href="{{ url_for('oauth_login', provider='facebook') }}">Login with Facebook</a></li>
+          <li><a href="{{ url_for('oauth_login', provider='x') }}">Login with Provider X</a></li>
+        </ul>
+      </div>
       <p>Don't have an account? <a href="{{ url_for('register') }}">Register</a>.</p>
     </div>
   </body>
 </html>
-""", navbar=navbar_html)
+""", navbar=navbar_html, styles=styles)
 
 # OAUTH LOGIN
 
@@ -593,24 +632,33 @@ async def oauth_callback(provider):
 @app.route("/register", methods=["GET", "POST"])
 async def register():
     navbar_html = await get_navbar_html()
+    styles = get_common_styles()
     if request.method == "POST":
         form = await request.form
-        for field in ["first_name", "last_name", "email", "address", "city", "state_province", "zip_code", "country"]:
+        for field in ["first_name", "last_name", "email", "address", "city", "state_province", "zip_code", "country", "password"]:
             if not form.get(field):
                 raise ValueError("Missing required field: " + field)
         session_db = await get_db_session()
         r = await session_db.execute(text("SELECT UserID FROM Users WHERE Email=:e"), {"e": form["email"]})
         if r.fetchone():
             raise ValueError("User already exists with that email.")
+        password = form["password"]
+        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         ins_q = """
-        INSERT INTO Users (FirstName, LastName, Email, RoleType, Address, City, StateProvince, ZipCode, Country)
+        INSERT INTO Users (FirstName, LastName, Email, RoleType, Address, City, StateProvince, ZipCode, Country, password_hash)
         OUTPUT inserted.UserID
-        VALUES (:fn, :ln, :em, 'Reader', :ad, :ct, :st, :zc, :co)
+        VALUES (:fn, :ln, :em, 'Reader', :ad, :ct, :st, :zc, :co, :pwd)
         """
         res = await session_db.execute(text(ins_q), {
-            "fn": form["first_name"], "ln": form["last_name"], "em": form["email"],
-            "ad": form["address"], "ct": form["city"], "st": form["state_province"],
-            "zc": form["zip_code"], "co": form["country"]
+            "fn": form["first_name"],
+            "ln": form["last_name"],
+            "em": form["email"],
+            "ad": form["address"],
+            "ct": form["city"],
+            "st": form["state_province"],
+            "zc": form["zip_code"],
+            "co": form["country"],
+            "pwd": hashed_password
         })
         new_id = res.fetchone().UserID
         await session_db.commit()
@@ -627,6 +675,7 @@ async def register():
   <head>
     <meta charset="UTF-8">
     <title>Register</title>
+    {{ styles|safe }}
   </head>
   <body>
     {{ navbar|safe }}
@@ -639,6 +688,8 @@ async def register():
         <input type="text" name="last_name" required>
         <label>Email*</label>
         <input type="email" name="email" required>
+        <label>Password*</label>
+        <input type="password" name="password" required>
         <label>Address*</label>
         <input type="text" name="address" required>
         <label>City*</label>
@@ -654,7 +705,7 @@ async def register():
     </div>
   </body>
 </html>
-""", navbar=navbar_html)
+""", navbar=navbar_html, styles=styles)
 
 # LOGOUT
 
@@ -678,7 +729,11 @@ async def dashboard():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Dashboard</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Dashboard</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -693,7 +748,7 @@ async def dashboard():
     </div>
   </body>
 </html>
-""", navbar=navbar_html, events=events)
+""", navbar=navbar_html, events=events, styles=get_common_styles())
 
 # MY SUBSCRIPTION (User)
 
@@ -733,7 +788,11 @@ async def my_subscription():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>My Subscription</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>My Subscription</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -755,7 +814,7 @@ async def my_subscription():
     </div>
   </body>
 </html>
-""", navbar=await get_navbar_html(), sub=sub)
+""", navbar=await get_navbar_html(), sub=sub, styles=get_common_styles())
 
 # CONSULTANTS DIRECTORY
 
@@ -778,7 +837,11 @@ async def list_consultants():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Consultants</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Consultants</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -819,7 +882,7 @@ async def list_consultants():
     </script>
   </body>
 </html>
-""", navbar=navbar_html, consultants=consultants)
+""", navbar=navbar_html, consultants=consultants, styles=get_common_styles())
 
 # EVENTS LIST
 
@@ -845,7 +908,11 @@ async def list_events():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Events</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Events</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -879,7 +946,7 @@ async def list_events():
     </div>
   </body>
 </html>
-""", navbar=navbar_html, upcoming=upcoming, past=past)
+""", navbar=navbar_html, upcoming=upcoming, past=past, styles=get_common_styles())
 
 # EVENT DETAILS + ICS
 
@@ -900,7 +967,11 @@ async def event_details(event_id):
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>{{ event.Title }}</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>{{ event.Title }}</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -930,7 +1001,7 @@ async def event_details(event_id):
     </div>
   </body>
 </html>
-""", navbar=navbar_html, event=event, display_dt=display_dt, speaker_name=speaker_name)
+""", navbar=navbar_html, event=event, display_dt=display_dt, speaker_name=speaker_name, styles=get_common_styles())
 
 
 @app.route("/events/<int:event_id>/ics")
@@ -976,7 +1047,11 @@ async def admin_portal():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Admin Portal</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Admin Portal</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -989,7 +1064,7 @@ async def admin_portal():
     </div>
   </body>
 </html>
-""", navbar=navbar_html)
+""", navbar=navbar_html, styles=get_common_styles())
 
 
 @app.route("/admin/users")
@@ -1003,7 +1078,11 @@ async def admin_list_users():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Admin - Users</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Admin - Users</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -1030,7 +1109,7 @@ async def admin_list_users():
     </div>
   </body>
 </html>
-""", navbar=navbar_html, users=users)
+""", navbar=navbar_html, users=users, styles=get_common_styles())
 
 
 @app.route("/admin/subscriptions", methods=["GET", "POST"])
@@ -1069,7 +1148,11 @@ async def admin_subscriptions():
     return await render_template_string("""
 <!DOCTYPE html>
 <html>
-  <head><meta charset="UTF-8"><title>Admin - Subscriptions</title></head>
+  <head>
+    <meta charset="UTF-8">
+    <title>Admin - Subscriptions</title>
+    {{ styles|safe }}
+  </head>
   <body>
     {{ navbar|safe }}
     <div class="container">
@@ -1112,7 +1195,7 @@ async def admin_subscriptions():
     </div>
   </body>
 </html>
-""", navbar=navbar_html, subs=subs)
+""", navbar=navbar_html, subs=subs, styles=get_common_styles())
 
 ##############################################################################
 # MAIN ENTRY POINT
