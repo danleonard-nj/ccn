@@ -479,9 +479,6 @@ async def home():
         </div>
       </div>
     </div>
-    <div class="footer">
-      Footer or additional info here
-    </div>
   </body>
 </html>
 """, navbar=navbar_html, upcoming=upcoming)
@@ -624,7 +621,7 @@ async def register():
         await session_db.commit()
         login_user(new_id, form["email"], "Reader")
         return redirect(url_for("dashboard"))
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head>
@@ -678,7 +675,7 @@ async def dashboard():
     session_db = await get_db_session()
     r = await session_db.execute(text("SELECT TOP 5 * FROM Events ORDER BY EventDateTime DESC"))
     events = [dict(x) for x in r.mappings().all()]
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Dashboard</title></head>
@@ -733,7 +730,7 @@ async def my_subscription():
     sub = r.fetchone()
     if not sub:
         raise ValueError("No subscription found. Contact support.")
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>My Subscription</title></head>
@@ -778,7 +775,7 @@ async def list_consultants():
         """))
         consultants = [dict(x) for x in r.mappings().all()]
         await redis_client.setex(cache_key, 600, json.dumps(consultants, default=str))
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Consultants</title></head>
@@ -845,7 +842,7 @@ async def list_events():
             e["EventDateTime"] = datetime.fromisoformat(e["EventDateTime"].replace("Z", ""))
     upcoming = [evt for evt in events if evt["EventDateTime"] > now_dt]
     past = [evt for evt in events if evt["EventDateTime"] <= now_dt]
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Events</title></head>
@@ -900,7 +897,7 @@ async def event_details(event_id):
         event["EventDateTime"] = datetime.fromisoformat(event["EventDateTime"].replace("Z", ""))
     speaker_name = "John Fetzer PhD, FRSC"
     display_dt = event["EventDateTime"].strftime("%d %b %Y, %I:%M %p")
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>{{ event.Title }}</title></head>
@@ -976,7 +973,7 @@ async def admin_portal():
     if not user_is_admin():
         raise ValueError("Unauthorized access.")
     navbar_html = await get_navbar_html()
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Admin Portal</title></head>
@@ -1003,7 +1000,7 @@ async def admin_list_users():
     session_db = await get_db_session()
     r = await session_db.execute(text("SELECT UserID, FirstName, LastName, Email, RoleType, CreatedDate FROM Users ORDER BY CreatedDate DESC"))
     users = [dict(x) for x in r.mappings().all()]
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Admin - Users</title></head>
@@ -1069,7 +1066,7 @@ async def admin_subscriptions():
         ORDER BY s.SubscriptionID DESC
     """))
     subs = [dict(x) for x in r.mappings().all()]
-    return render_template_string("""
+    return await render_template_string("""
 <!DOCTYPE html>
 <html>
   <head><meta charset="UTF-8"><title>Admin - Subscriptions</title></head>
