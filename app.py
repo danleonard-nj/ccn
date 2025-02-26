@@ -359,7 +359,11 @@ async def get_navbar_html():
   </div>
 </div>
 """
-    return await render_template_string(navbar_template)
+    # Pass current_user, user_is_admin, and session to the template.
+    return await render_template_string(navbar_template,
+                                        current_user=current_user,
+                                        user_is_admin=user_is_admin,
+                                        session=session)
 
 ##############################################################################
 # GENERIC EXCEPTION HANDLER
